@@ -938,7 +938,12 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 	// Test 4: Verify output token rate limit enforcement
 	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
-		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
+		// Mock backends return ~1 completion token per response. Use a low output
+		// budget so the limit is hit within the attempt loop. Clearing input on
+		// update must actually drop the input limiter (unset = unlimited).
+		const outputOnlyLimit = uint32(5)
+
+		t.Logf("Test 4: Verifying output token rate limit (%d tokens/minute)...", outputOnlyLimit)
 
 		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute](filepath.Join(routercontext.TestDataDir, "ModelRouteWithRateLimit.yaml"))
 		modelRoute.Namespace = testNamespace
@@ -963,8 +968,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 
 		// Update ModelRoute to disable input token limit
 		createdModelRoute.Spec.RateLimit.InputTokensPerUnit = nil
-		outputLimit := uint32(outputTokenLimit)
-		createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
+		createdModelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputOnlyLimit
 
 		updatedModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Update(ctx, createdModelRoute, metav1.UpdateOptions{})
 		require.NoError(t, err, "Failed to update ModelRoute")
@@ -997,6 +1001,8 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 				t.Logf("Output rate limited after %d requests", successfulRequests)
 				assert.Contains(t, strings.ToLower(string(responseBody)), "rate limit",
 					"Output rate limit error should mention rate limit")
+				assert.Contains(t, strings.ToLower(string(responseBody)), "output",
+					"Expected output token rate limit error after clearing inputTokensPerUnit")
 				rateLimited = true
 				break
 			} else if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
