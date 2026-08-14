@@ -370,3 +370,36 @@ func TestTokenRateLimiter_PartialUpdateClearsSideLimiter(t *testing.T) {
 		t.Fatalf("expected request allowed after clearing outputTokensPerUnit: %v", err)
 	}
 }
+
+func TestTokenRateLimiter_OutputLimitAfterRecordedCompletions(t *testing.T) {
+	rl := NewTokenRateLimiter()
+	model := "test-model"
+	outputTokens := uint32(5)
+	unit := networkingv1alpha1.Minute
+
+	if err := rl.AddOrUpdateLimiter(model, &networkingv1alpha1.RateLimit{
+		OutputTokensPerUnit: &outputTokens,
+		Unit:                unit,
+	}); err != nil {
+		t.Fatalf("AddOrUpdateLimiter: %v", err)
+	}
+
+	var limitedAt int
+	for i := 0; i < 20; i++ {
+		err := rl.RateLimit(model, "hello world")
+		if err != nil {
+			if _, ok := err.(*OutputRateLimitExceededError); !ok {
+				t.Fatalf("request %d: expected OutputRateLimitExceededError, got %T: %v", i, err, err)
+			}
+			limitedAt = i
+			break
+		}
+		rl.RecordOutputTokens(model, 1)
+	}
+	if limitedAt == 0 {
+		t.Fatal("expected output rate limit after recording completion tokens")
+	}
+	if limitedAt > 6 {
+		t.Fatalf("expected output limit around burst 5, got first rejection at request %d", limitedAt)
+	}
+}
