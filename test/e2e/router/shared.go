@@ -941,7 +941,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 		// Mock backends return ~1 completion token per response. Use a low output
 		// budget so the limit is hit within the attempt loop. Clearing input on
 		// update must actually drop the input limiter (unset = unlimited).
-		const outputOnlyLimit = uint32(5)
+		outputOnlyLimit := uint32(5)
 
 		t.Logf("Test 4: Verifying output token rate limit (%d tokens/minute)...", outputOnlyLimit)
 
