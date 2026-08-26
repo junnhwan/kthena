@@ -395,6 +395,7 @@ type store struct {
 	httpRoutes          map[string]*gatewayv1.HTTPRoute // key: namespace/name, value: *gatewayv1.HTTPRoute
 	gatewayRoutes       map[string]sets.Set[string]     // key: gateway key (namespace/name), value: set of HTTPRoute keys
 	httpRouteRegexCache sync.Map                        // key: regex pattern, value: *compiledPattern
+	httpRouteRegexRefs  map[string]int                  // key: regex pattern, value: number of HTTPRoutes referencing it
 	// New fields for callback management
 	callbacks map[string][]CallbackFunc
 
@@ -421,6 +422,7 @@ func New(opts ...Option) Store {
 		inferencePools:      make(map[string]*inferencev1.InferencePool),
 		httpRoutes:          make(map[string]*gatewayv1.HTTPRoute),
 		gatewayRoutes:       make(map[string]sets.Set[string]),
+		httpRouteRegexRefs:  make(map[string]int),
 		callbacks:           make(map[string][]CallbackFunc),
 		initialSynced:       &atomic.Bool{},
 		requestWaitingQueue: sync.Map{},
@@ -2384,6 +2386,7 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 
 	s.httpRouteMutex.Lock()
 	oldRoute := s.httpRoutes[key]
+	s.updateHTTPRouteRegexRefs(oldRoute, httpRoute)
 	s.httpRoutes[key] = httpRoute
 
 	// Update gateway routes mapping
@@ -2424,8 +2427,6 @@ func (s *store) AddOrUpdateHTTPRoute(httpRoute *gatewayv1.HTTPRoute) error {
 
 	s.httpRouteMutex.Unlock()
 
-	s.gcHTTPRouteRegexCache()
-
 	klog.V(4).Infof("Added or updated HTTPRoute: %s", key)
 	return nil
 }
@@ -2439,8 +2440,9 @@ func isGatewayParentRef(parentRef gatewayv1.ParentReference) bool {
 
 func (s *store) DeleteHTTPRoute(key string) error {
 	s.httpRouteMutex.Lock()
-	_, exists := s.httpRoutes[key]
+	oldRoute, exists := s.httpRoutes[key]
 	if exists {
+		s.updateHTTPRouteRegexRefs(oldRoute, nil)
 		// Remove from gateway routes mapping
 		for gatewayKey, routeSet := range s.gatewayRoutes {
 			routeSet.Delete(key)
@@ -2451,8 +2453,6 @@ func (s *store) DeleteHTTPRoute(key string) error {
 		delete(s.httpRoutes, key)
 	}
 	s.httpRouteMutex.Unlock()
-
-	s.gcHTTPRouteRegexCache()
 
 	if exists {
 		klog.V(4).Infof("Deleted HTTPRoute: %s", key)
@@ -2510,8 +2510,13 @@ func (s *store) CompileHTTPRouteRegex(pattern string) (*regexp.Regexp, error) {
 	return cp.re, cp.err
 }
 
-// collectHTTPRouteRegexes adds every regex path pattern referenced by route to out
-func collectHTTPRouteRegexes(route *gatewayv1.HTTPRoute, out map[string]struct{}) {
+// collectHTTPRouteRegexes returns every regex path pattern referenced by route.
+func collectHTTPRouteRegexes(route *gatewayv1.HTTPRoute) map[string]struct{} {
+	patterns := make(map[string]struct{})
+	if route == nil {
+		return patterns
+	}
+
 	for _, rule := range route.Spec.Rules {
 		for _, match := range rule.Matches {
 			if match.Path == nil || match.Path.Type == nil || *match.Path.Type != gatewayv1.PathMatchRegularExpression {
@@ -2521,26 +2526,40 @@ func collectHTTPRouteRegexes(route *gatewayv1.HTTPRoute, out map[string]struct{}
 			if match.Path.Value != nil {
 				value = *match.Path.Value
 			}
-			out[value] = struct{}{}
+			patterns[value] = struct{}{}
 		}
 	}
+	return patterns
 }
 
-// gcHTTPRouteRegexCache drops compiled patterns that no HTTPRoute references any more
-func (s *store) gcHTTPRouteRegexCache() {
-	live := make(map[string]struct{})
-	s.httpRouteMutex.RLock()
-	for _, route := range s.httpRoutes {
-		if route != nil {
-			collectHTTPRouteRegexes(route, live)
-		}
+// updateHTTPRouteRegexRefs updates cache references for one HTTPRoute mutation.
+// The caller must hold httpRouteMutex.
+func (s *store) updateHTTPRouteRegexRefs(oldRoute, newRoute *gatewayv1.HTTPRoute) {
+	if s.httpRouteRegexRefs == nil {
+		s.httpRouteRegexRefs = make(map[string]int)
 	}
-	s.httpRouteMutex.RUnlock()
 
-	s.httpRouteRegexCache.Range(func(key, _ any) bool {
-		if _, ok := live[key.(string)]; !ok {
-			s.httpRouteRegexCache.Delete(key)
+	oldPatterns := collectHTTPRouteRegexes(oldRoute)
+	newPatterns := collectHTTPRouteRegexes(newRoute)
+
+	for pattern := range oldPatterns {
+		if _, stillReferenced := newPatterns[pattern]; stillReferenced {
+			continue
 		}
-		return true
-	})
+
+		refs := s.httpRouteRegexRefs[pattern]
+		if refs <= 1 {
+			delete(s.httpRouteRegexRefs, pattern)
+			s.httpRouteRegexCache.Delete(pattern)
+			continue
+		}
+		s.httpRouteRegexRefs[pattern] = refs - 1
+	}
+
+	for pattern := range newPatterns {
+		if _, wasReferenced := oldPatterns[pattern]; wasReferenced {
+			continue
+		}
+		s.httpRouteRegexRefs[pattern]++
+	}
 }

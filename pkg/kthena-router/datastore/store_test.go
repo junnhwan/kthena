@@ -1792,8 +1792,9 @@ func TestAddOrUpdateHTTPRoute_UpdatesGatewayRoutes(t *testing.T) {
 
 func newTestHTTPRouteStore() *store {
 	return &store{
-		httpRoutes:    make(map[string]*gatewayv1.HTTPRoute),
-		gatewayRoutes: make(map[string]sets.Set[string]),
+		httpRoutes:         make(map[string]*gatewayv1.HTTPRoute),
+		gatewayRoutes:      make(map[string]sets.Set[string]),
+		httpRouteRegexRefs: make(map[string]int),
 	}
 }
 
